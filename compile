@@ -1,0 +1,3 @@
+#!/bin/bash
+gfortran -O3 -fopenmp -mcmodel=medium -mieee-fp -ftree-vectorize -march=native masc.f90 -o masc.x
+
