@@ -73,9 +73,14 @@ subroutine SZ_effect(nx, ny, nz, res, grid_centers_x, grid_centers_y, grid_cente
                     npalev, namrx, namry, namrz, patch_level, patchrx, patchry, patchrz, &
                     patchnx, patchny, patchnz, npatches_inside, which_patches, &
                     L, ncoarse, solap, U1, U11, U2, U21, U3, U31, U4, U41, temp, temp1, &
+                    cx, cy, cz, radius, &
                     bulkVx, bulkVy, bulkVz, &
+                    zeta8, &
                     local_kSZ_x, local_kSZ_y, local_kSZ_z, tSZ_x, tSZ_y, tSZ_z, &
-                    global_kSZ_x, global_kSZ_y, global_kSZ_z)
+                    global_kSZ_x, global_kSZ_y, global_kSZ_z, &
+                    dens_x, dens_y, dens_z, los_vx, los_vy, los_vz, &
+                    temp_cutoff, dens_cutoff, &
+                    T_SZ_cells, dens_SZ_cells, thrash_mass_fraction)
 
 use omp_lib
 implicit none
@@ -83,22 +88,25 @@ implicit none
 !input, output
 integer :: nx, ny, nz
 integer :: npalev, namrx, namry, namrz, npatches_inside, ncoarse
-real :: L
+real :: L, temp_cutoff, dens_cutoff
 integer, dimension(npalev) :: patchnx, patchny, patchnz, patch_level
 real, dimension(npalev) :: patchrx, patchry, patchrz
 integer, dimension(npatches_inside) :: which_patches
 integer, dimension(namrx, namry, namrz, npalev) :: solap
 real, dimension(ncoarse, ncoarse, ncoarse) :: U1, U2, U3, U4, temp
 real, dimension(namrx, namry, namrz, npalev) :: U11, U21, U31, U41, temp1
+real :: cx, cy, cz, radius
 real(8) :: bulkVx, bulkVy, bulkVz
 real(8), dimension(nx) :: grid_centers_x
 real(8), dimension(ny) :: grid_centers_y
 real(8), dimension(nz) :: grid_centers_z
 real(8) :: res
-real(8), dimension(ny, nz) :: local_kSZ_x, global_kSZ_x, tSZ_x
-real(8), dimension(nx, nz) :: local_kSZ_y, global_kSZ_y, tSZ_y
-real(8), dimension(nx, ny) :: local_kSZ_z, global_kSZ_z, tSZ_z
-
+real(8) :: zeta8
+real(8), dimension(ny, nz) :: local_kSZ_x, global_kSZ_x, tSZ_x, dens_x, los_vx
+real(8), dimension(nx, nz) :: local_kSZ_y, global_kSZ_y, tSZ_y, dens_y, los_vy
+real(8), dimension(nx, ny) :: local_kSZ_z, global_kSZ_z, tSZ_z, dens_z, los_vz
+real(8), dimension(nx*ny*nz) :: T_SZ_cells, dens_SZ_cells
+real(8) :: thrash_mass_fraction
 !constants
 real(8), parameter :: mpc2m = 3.0856e22 !Mpc to m
 real(8), parameter :: c = 2.9979e8 !m/s
@@ -107,20 +115,33 @@ real(8), parameter :: me = 9.1094e-31 !kg
 real(8), parameter :: sigma_T = 6.6524e-29 !m^2
 real(8), parameter :: factor_kSZ = sigma_T * mpc2m
 real(8), parameter :: factor_tSZ = kb*sigma_T/(me*c**2) * mpc2m
-real(8), parameter :: max_ksz = 1e-4 !maximum value of a cell contribution to kSZ
+real(8), parameter :: mu = 0.6 !mean molecular weight, for ionized gas
+real(8), parameter :: mp = 1.6726e-27 !kg
+real(8), parameter :: density_to_isu = 4.6693e-22 !kg/m^3
 
-!iterators
+!local
 integer :: ix, jy, kz
+real(8) :: thrashVol_x, thrashMass_x, volTot_x, massTot_x
 
 !ray variables
 real(8) :: xpoint, ypoint, zpoint
 integer :: patch_id, amr_ix, amr_iy, amr_iz
 real(8) :: dens, T, LOSvel
 
+thrashVol_x = 0.0
+thrashMass_x = 0.0
+volTot_x = 0.0
+massTot_x = 0.0
+
+bulkVx = bulkVx/(c/1.e3) !to c units
+bulkVy = bulkVy/(c/1.e3)
+bulkVz = bulkVz/(c/1.e3)
+
 !X direction
 !$OMP PARALLEL DEFAULT(SHARED), &
 !$OMP PRIVATE(jy, kz, zpoint, ypoint, xpoint, patch_id, amr_ix, amr_iy, amr_iz, dens, T, LOSvel)
-!$OMP DO REDUCTION(+:global_kSZ_x, local_kSZ_x, tSZ_x)
+!$OMP DO REDUCTION(+:global_kSZ_x, local_kSZ_x, tSZ_x, los_vx, dens_x, volTot_x, massTot_x, thrashVol_x, thrashMass_x, &
+!$OMP T_SZ_cells, dens_SZ_cells)
 do kz=1,nz
     zpoint = grid_centers_z(kz)
     do jy=1,ny
@@ -145,21 +166,40 @@ do kz=1,nz
                 T = temp1(amr_ix, amr_iy, amr_iz, patch_id)
                 LOSvel = U21(amr_ix, amr_iy, amr_iz, patch_id)
             endif
+
+            !PHASE DIAGRAM
+            T_SZ_cells(ix + (jy-1)*nx + (kz-1)*nx*ny) = T
+            dens_SZ_cells(ix + (jy-1)*nx + (kz-1)*nx*ny) = dens
+
+            !check density and temperature (to prove that it is indeed ICM)
+            !control for avoided cells
+            if (dens > dens_cutoff .or. T < temp_cutoff) then
+                thrashVol_x = thrashVol_x + res**3
+                thrashMass_x = thrashMass_x + dens * res**3
+            endif
+            volTot_x = volTot_x + res**3
+            massTot_x = massTot_x + dens * res**3
+
+            !avoid cluster center for unusually high values 
+            if ((xpoint-cx)**2 + (ypoint-cy)**2 + (zpoint-cz)**2 < (0.1*radius)**2) then
+                cycle
+            endif
+
+            !density threshold for avoiding unphyisical clumps
+            if (dens > dens_cutoff) then
+                dens = dens_cutoff
+            endif
             
-            !control for large values (discontinuities) in kSZ
-            if (factor_kSZ * dens * abs(LOSvel) * res > max_ksz) then
-                global_kSZ_x(jy,kz) = global_kSZ_x(jy,kz) + sign(max_ksz, LOSvel)
-            else
-                global_kSZ_x(jy,kz) = global_kSZ_x(jy,kz) + factor_kSZ * dens * LOSvel * res
+            !tempreature threshold for selecting just ICM (ionized)
+            if (T < temp_cutoff) then
+                cycle
             endif
 
-            if (factor_kSZ * dens * abs(LOSvel - bulkVx/(c/1.e3)) * res > max_ksz) then
-                local_kSZ_x(jy,kz) = local_kSZ_x(jy,kz) + sign(max_ksz, LOSvel - bulkVx/(c/1.e3))
-            else
-                local_kSZ_x(jy,kz) = local_kSZ_x(jy,kz) + factor_kSZ * dens * (LOSvel - bulkVx/(c/1.e3)) * res
-            endif
-
-            tSZ_x(jy,kz) = tSZ_x(jy,kz) + factor_tSZ * dens * T * res
+            global_kSZ_x(jy,kz) = global_kSZ_x(jy,kz) + dens * LOSvel * res
+            local_kSZ_x(jy,kz) = local_kSZ_x(jy,kz) + dens * (LOSvel - bulkVx) * res
+            tSZ_x(jy,kz) = tSZ_x(jy,kz) + dens * T * res
+            los_vx(jy,kz) = los_vx(jy,kz) + LOSvel * res
+            dens_x(jy,kz) = dens_x(jy,kz) + dens * res
 
         enddo
     enddo
@@ -170,7 +210,7 @@ enddo
 !Y direction
 !$OMP PARALLEL DEFAULT(SHARED), &
 !$OMP PRIVATE(ix, kz, zpoint, ypoint, xpoint, patch_id, amr_ix, amr_iy, amr_iz, dens, T, LOSvel)
-!$OMP DO REDUCTION(+:global_kSZ_y, local_kSZ_y, tSZ_y)
+!$OMP DO REDUCTION(+:global_kSZ_y, local_kSZ_y, tSZ_y, los_vy, dens_y)
 do kz=1,nz
     zpoint = grid_centers_z(kz)
     do ix=1,nx
@@ -196,20 +236,25 @@ do kz=1,nz
                 LOSvel = U31(amr_ix, amr_iy, amr_iz, patch_id)
             endif
 
-            !control for large values (discontinuities) in kSZ
-            if (factor_kSZ * dens * abs(LOSvel) * res > max_ksz) then
-                global_kSZ_y(ix,kz) = global_kSZ_y(ix,kz) + sign(max_ksz, LOSvel)
-            else
-                global_kSZ_y(ix,kz) = global_kSZ_y(ix,kz) + factor_kSZ * dens * LOSvel * res
+            !avoid cluster center for unusually high values 
+            if ((xpoint-cx)**2 + (ypoint-cy)**2 + (zpoint-cz)**2 < (0.1*radius)**2) then
+                cycle
             endif
 
-            if (factor_kSZ * dens * abs(LOSvel - bulkVy/(c/1.e3)) * res > max_ksz) then
-                local_kSZ_y(ix,kz) = local_kSZ_y(ix,kz) + sign(max_ksz, LOSvel - bulkVy/(c/1.e3))
-            else
-                local_kSZ_y(ix,kz) = local_kSZ_y(ix,kz) + factor_kSZ * dens * (LOSvel - bulkVy/(c/1.e3)) * res
+            !check density and temperature (to prove that it is indeed ICM)
+            if (dens > dens_cutoff) then
+                dens = dens_cutoff
             endif
 
-            tSZ_y(ix,kz) = tSZ_y(ix,kz) + factor_tSZ * dens * T * res
+            if (T < temp_cutoff) then
+                cycle
+            endif
+
+            global_kSZ_y(ix,kz) = global_kSZ_y(ix,kz) + dens * LOSvel * res
+            local_kSZ_y(ix,kz) = local_kSZ_y(ix,kz) + dens * (LOSvel - bulkVy) * res
+            tSZ_y(ix,kz) = tSZ_y(ix,kz) + dens * T * res
+            los_vy(ix,kz) = los_vy(ix,kz) + LOSvel * res
+            dens_y(ix,kz) = dens_y(ix,kz) + dens * res
 
         enddo
     enddo
@@ -220,7 +265,7 @@ enddo
 !Z direction
 !$OMP PARALLEL DEFAULT(SHARED), &
 !$OMP PRIVATE(ix, jy, zpoint, ypoint, xpoint, patch_id, amr_ix, amr_iy, amr_iz, dens, T, LOSvel)
-!$OMP DO REDUCTION(+:global_kSZ_z, local_kSZ_z, tSZ_z)
+!$OMP DO REDUCTION(+:global_kSZ_z, local_kSZ_z, tSZ_z, los_vz, dens_z)
 do jy=1,ny
     ypoint = grid_centers_y(jy)
     do ix=1,nx
@@ -246,20 +291,26 @@ do jy=1,ny
                 LOSvel = U41(amr_ix, amr_iy, amr_iz, patch_id)
             endif
 
-            !control for large values (discontinuities) in kSZ
-            if (factor_kSZ * dens * abs(LOSvel) * res > max_ksz) then
-                global_kSZ_z(ix,jy) = global_kSZ_z(ix,jy) + sign(max_ksz, LOSvel)
-            else
-                global_kSZ_z(ix,jy) = global_kSZ_z(ix,jy) + factor_kSZ * dens * LOSvel * res
+            !avoid cluster center for unusually high values 
+            if ((xpoint-cx)**2 + (ypoint-cy)**2 + (zpoint-cz)**2 < (0.1*radius)**2) then
+                cycle
             endif
 
-            if (factor_kSZ * dens * abs(LOSvel - bulkVz/(c/1.e3)) * res > max_ksz) then
-                local_kSZ_z(ix,jy) = local_kSZ_z(ix,jy) + sign(max_ksz, LOSvel - bulkVz/(c/1.e3))
-            else
-                local_kSZ_z(ix,jy) = local_kSZ_z(ix,jy) + factor_kSZ * dens * (LOSvel - bulkVz/(c/1.e3)) * res
+            !check density and temperature (to prove that it is indeed ICM)
+            if (dens > dens_cutoff) then
+                dens = dens_cutoff
             endif
 
-            tSZ_z(ix,jy) = tSZ_z(ix,jy) + factor_tSZ * dens * T * res
+            if (T < temp_cutoff) then
+                cycle
+            endif
+
+
+            global_kSZ_z(ix,jy) = global_kSZ_z(ix,jy) + dens * LOSvel * res
+            local_kSZ_z(ix,jy) = local_kSZ_z(ix,jy) + dens * (LOSvel - bulkVz) * res
+            tSZ_z(ix,jy) = tSZ_z(ix,jy) + dens * T * res
+            los_vz(ix,jy) = los_vz(ix,jy) + LOSvel * res
+            dens_z(ix,jy) = dens_z(ix,jy) + dens * res
 
         enddo
     enddo
@@ -267,5 +318,61 @@ enddo
 !$OMP END DO
 !$OMP END PARALLEL
 
+!First, density to ISU
+global_kSZ_x = global_kSZ_x * density_to_isu
+global_kSZ_y = global_kSZ_y * density_to_isu
+global_kSZ_z = global_kSZ_z * density_to_isu
+local_kSZ_x = local_kSZ_x * density_to_isu
+local_kSZ_y = local_kSZ_y * density_to_isu
+local_kSZ_z = local_kSZ_z * density_to_isu
+tSZ_x = tSZ_x * density_to_isu
+tSZ_y = tSZ_y * density_to_isu
+tSZ_z = tSZ_z * density_to_isu
+dens_x = dens_x * density_to_isu
+dens_y = dens_y * density_to_isu
+dens_z = dens_z * density_to_isu
+
+!Second, mass density to number density of electrons
+global_kSZ_x = global_kSZ_x / (mu*mp)
+global_kSZ_y = global_kSZ_y / (mu*mp)
+global_kSZ_z = global_kSZ_z / (mu*mp)
+local_kSZ_x = local_kSZ_x / (mu*mp)
+local_kSZ_y = local_kSZ_y / (mu*mp)
+local_kSZ_z = local_kSZ_z / (mu*mp)
+tSZ_x = tSZ_x / (mu*mp)
+tSZ_y = tSZ_y / (mu*mp)
+tSZ_z = tSZ_z / (mu*mp)
+dens_x = dens_x / (mu*mp)
+dens_y = dens_y / (mu*mp)
+dens_z = dens_z / (mu*mp)
+
+!Third, multiply by the factors outside the integral
+global_kSZ_x = global_kSZ_x * factor_kSZ
+global_kSZ_y = global_kSZ_y * factor_kSZ
+global_kSZ_z = global_kSZ_z * factor_kSZ
+local_kSZ_x = local_kSZ_x * factor_kSZ
+local_kSZ_y = local_kSZ_y * factor_kSZ
+local_kSZ_z = local_kSZ_z * factor_kSZ
+tSZ_x = tSZ_x * factor_tSZ
+tSZ_y = tSZ_y * factor_tSZ
+tSZ_z = tSZ_z * factor_tSZ
+
+!Last, redshift dependence of the cell size
+global_kSZ_x = global_kSZ_x * (1.0+zeta8)
+global_kSZ_y = global_kSZ_y * (1.0+zeta8)
+global_kSZ_z = global_kSZ_z * (1.0+zeta8)
+local_kSZ_x = local_kSZ_x * (1.0+zeta8)
+local_kSZ_y = local_kSZ_y * (1.0+zeta8)
+local_kSZ_z = local_kSZ_z * (1.0+zeta8)
+tSZ_x = tSZ_x * (1.0+zeta8)
+tSZ_y = tSZ_y * (1.0+zeta8)
+tSZ_z = tSZ_z * (1.0+zeta8)
+
+!
+thrash_mass_fraction = thrashMass_x/massTot_x
+
+
+write(*,*) 'Thrash mass fraction', thrashMass_x/massTot_x, thrashMass_x, massTot_x
+write(*,*) 'Thrash volume fraction', thrashVol_x/volTot_x, thrashVol_x, volTot_x
 
 end subroutine

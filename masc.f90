@@ -18,6 +18,7 @@
 include 'reader.f90'
 include 'patches.f90'
 include 'SZ.f90'
+include 'gas.f90'
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 program cluster_SZ
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -52,26 +53,33 @@ integer, dimension(npalev) :: patch_inside
 integer, dimension(npalev) :: patchid
 integer :: npatches_inside
 integer, dimension(:), allocatable :: which_patches
-real(8) :: bulkVx, bulkVy, bulkVz
+real(8) :: bulkVx, bulkVy, bulkVz, gas_mass
 
 !PARAMETERS
 character(len=5) iter_string
 character(len=5) ih_string
-integer :: first, last, every, iter, is_magnetic_field
+integer :: first, last, every, iter, is_magnetic_field, apply_filter
 real :: zeta
 real(8) :: ache, omega0, fdm, zeta8, rho_background
 real :: lado0
 real :: cio_mass, cio_lenght, cio_speed
-real :: thres_mass, factor_Rvir
+real :: thres_mass, factor_Rvir, temp_cutoff, dens_cutoff
+real :: R_core
 
 !GAS DENSITY
-real(8), parameter :: mu = 0.6 !mean molecular weight, for ionized gas
-real(8), parameter :: mp = 1.6726e-27 !kg
-real(8), parameter :: density_from_masclet2isu = 4.72e-21 !kg/m^3
+real(8), parameter :: cgs_to_density = 2.1416e24 !u.mass / u.lenght^3
+real(8), parameter :: density_to_cgs = 1/cgs_to_density !g / cm^3
 
 !OUTPUT
 real(8), allocatable, dimension(:,:) :: local_kSZ_x, global_kSZ_x, local_kSZ_y, global_kSZ_y, local_kSZ_z, global_kSZ_z
 real(8), allocatable, dimension(:,:) :: tSZ_x, tSZ_y, tSZ_z
+real(8), allocatable, dimension(:,:) :: dens_x, dens_y, dens_z
+real(8), allocatable, dimension(:,:) :: los_vx, los_vy, los_vz
+real(8), allocatable, dimension(:) :: T_SZ_cells ! for the phase diagram of used cells
+real(8), allocatable, dimension(:) :: dens_SZ_cells ! for the phase diagram of used cells
+real(8), allocatable, dimension(:) :: thrash_mass_fraction ! Analyzing the fraction of mass not used against the total mass of the cluster
+real(8), allocatable, dimension(:) :: mvir_array ! Analyzing the fraction of mass not used against the total mass of the cluster
+real(8) :: bas8
 
 !LOOP INDICES
 integer :: i, j, k, ix, jy, kz, ih
@@ -103,8 +111,14 @@ READ(1,*) !Cluster mass threshold (Msun) ---------------------------------------
 READ(1,*) thres_mass
 READ(1,*) !Cluster box half sidelength factor (cMpc) (to multiply Rvir) --------->
 READ(1,*) factor_Rvir
+READ(1,*) !Cluster radius of core region to calculate bulk velocity (cMpc) ------>
+READ(1,*) R_core
+READ(1,*) !T_cutoff (K), dens_cutoff (1/m^3) ------------------------------------>
+READ(1,*) temp_cutoff, dens_cutoff
+dens_cutoff = dens_cutoff * cgs_to_density !internal units
 ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! 
 CLOSE(1)
+
 !///////////////////////////////////
 !///////////////////////////////////
 !///////////////////////////////////
@@ -122,6 +136,9 @@ halRy = 0.0
 halRz = 0.0
 halVirMass = 0.0
 halVirRad = 0.0
+halVx = 0.0
+halVy = 0.0
+halVz = 0.0
 nhaloes = 0
 ! CALL READER
 call read_ASOHF_catalogue(iter, nhaloes, halID, halRx, halRy, halRz, halVirMass, halVirRad, &
@@ -191,17 +208,12 @@ call create_patch_levels(npalev, nlevels, npatch, patch_level)
 
 ! BACKGROUND DENSITY of the UNIVERSE at this redshift
 zeta8 = dble(zeta)
-rho_background = 3.D0 * omega0 * (ache*3.66D-3)**2 * (1.D0+zeta8)**3 ! in u.mass / u.lenght^3
-
+rho_background = omega0 * 1.879e-29 * ache**2 * (1.0 + zeta8)**3.0 !cgs
+write(*,*) 'rho_background (g/cm^3)', rho_background
+rho_background = rho_background * cgs_to_density !internal units
 ! U1 and U11 (density_contrast) to density
 U1 = (1. + U1) * rho_background
 U11 = (1. + U11) * rho_background
-! Then conversion from density in units of background density to density in units of kg/m^3
-U1 = U1 * density_from_masclet2isu
-U11 = U11 * density_from_masclet2isu
-! From gas density to number density of electrons
-U1 = U1 / (mu*mp)
-U11 = U11 / (mu*mp)
 
 ! write(*,*) 'max density', maxval(abs(U11))
 ! write(*,*) 'max vx', maxval(abs(U21))
@@ -220,11 +232,16 @@ U11 = U11 / (mu*mp)
 
 write(*,*) 'Calculating the S-Z effect for desired clusters...'
 
+allocate(thrash_mass_fraction(nhaloes))
+allocate(mvir_array(nhaloes))
+thrash_mass_fraction = 0.0
+mvir_array = 0.0
 do ih=1,nhaloes
-
+    mvir_array(ih) = dble(halVirMass(ih))
     if (halVirMass(ih) < thres_mass) cycle
 
-    ! create the box for the cluster
+    ! Now define the region of the maps
+    ! Create the box
     box(1) = halRx(ih) - factor_Rvir*halVirRad(ih)
     box(2) = halRx(ih) + factor_Rvir*halVirRad(ih)
     box(3) = halRy(ih) - factor_Rvir*halVirRad(ih)
@@ -273,12 +290,38 @@ do ih=1,nhaloes
     allocate(which_patches(npatches_inside))
     which_patches = pack(patchid, patch_inside /= 0)
 
+    ! the box must be centered in the potencial minimum of the cluster. A good approximation is the DM Density peak used.
+    ! furthermore, the bulk velocity must be calculated inside some R_core (e.g 300 kpc) from the density peak
+    ! this is in order to avoid the bulk velocity of the cluster to be contaminated by the infalling substructures
+    ! Recalculate the bulk velocity of the cluster
+    bulkVx = 0.0
+    bulkVy = 0.0
+    bulkVz = 0.0
+    gas_mass = 0.0
+    call gas_core_bulk_velocity(npalev, namrx, namry, namrz, &
+                                  patch_level, patchrx, patchry, patchrz, &
+                                  patchnx, patchny, patchnz, npatches_inside, &
+                                  which_patches, lado0, nx, solap, cr0amr1, &
+                                  U11, U21, U31, U41, &
+                                  halRx(ih), halRy(ih), halRz(ih), R_core, bulkVx, bulkVy, bulkVz, gas_mass)
+    bulkVx = bulkVx * cio_speed
+    bulkVy = bulkVy * cio_speed
+    bulkVz = bulkVz * cio_speed
+    ! bulkVx = halVx(ih)
+    ! bulkVy = halVy(ih)
+    ! bulkVz = halVz(ih)
+
     write(*,*) '    Now, calculating the SZ effect...'
 
     ! SUNYAEV-ZELDOVICH EFFECT calculation
     allocate(local_kSZ_x(ny, nz), local_kSZ_y(nx, nz), local_kSZ_z(nx, ny))
     allocate(global_kSZ_x(ny, nz), global_kSZ_y(nx, nz), global_kSZ_z(nx, ny))
     allocate(tSZ_x(ny, nz), tSZ_y(nx, nz), tSZ_z(nx, ny))
+    allocate(dens_x(ny, nz), dens_y(nx, nz), dens_z(nx, ny))
+    allocate(los_vx(ny, nz), los_vy(nx, nz), los_vz(nx, ny))
+    !phase diagram
+    allocate(T_SZ_cells(nx*ny*nz))
+    allocate(dens_SZ_cells(nx*ny*nz))
 
     local_kSZ_x = 0.0
     local_kSZ_y = 0.0
@@ -289,18 +332,34 @@ do ih=1,nhaloes
     tSZ_x = 0.0
     tSZ_y = 0.0
     tSZ_z = 0.0
+    dens_x = 0.0
+    dens_y = 0.0
+    dens_z = 0.0
+    los_vx = 0.0
+    los_vy = 0.0
+    los_vz = 0.0
+    T_SZ_cells = 0.0
+    dens_SZ_cells = 0.0
 
-    bulkVx = dble(halVx(ih))
-    bulkVy = dble(halVy(ih))
-    bulkVz = dble(halVz(ih))
+    bulkVx = dble(bulkVx) !dble(halVx(ih))
+    bulkVy = dble(bulkVy) !dble(halVy(ih))
+    bulkVz = dble(bulkVz) !dble(halVz(ih))
 
+    bas8 = 0.0
     call SZ_effect(nx, ny, nz, res, grid_centers_x, grid_centers_y, grid_centers_z, &
                     npalev, namrx, namry, namrz, patch_level, patchrx, patchry, patchrz, &
                     patchnx, patchny, patchnz, npatches_inside, which_patches, &
                     lado0, nmax, solap, U1, U11, U2, U21, U3, U31, U4, U41, temp, temp1, &
+                    halRx(ih), halRy(ih), halRz(ih), halVirRad(ih), &
                     bulkVx, bulkVy, bulkVz, &
+                    zeta8, &
                     local_kSZ_x, local_kSZ_y, local_kSZ_z, tSZ_x, tSZ_y, tSZ_z, &
-                    global_kSZ_x, global_kSZ_y, global_kSZ_z)
+                    global_kSZ_x, global_kSZ_y, global_kSZ_z, &
+                    dens_x, dens_y, dens_z, los_vx, los_vy, los_vz, &
+                    temp_cutoff, dens_cutoff, &
+                    T_SZ_cells, dens_SZ_cells, bas8)
+
+    thrash_mass_fraction(ih) = dble(bas8)
 
     write(*,*) '    Cluster', ih, 'finished , saving and deallocating arrays...'
 
@@ -321,15 +380,46 @@ do ih=1,nhaloes
     write(33) ((sngl(tSZ_x(jy,kz)), jy=1,ny), kz=1,nz)
     write(33) ((sngl(tSZ_y(ix,kz)), ix=1,nx), kz=1,nz)
     write(33) ((sngl(tSZ_z(ix,jy)), ix=1,nx), jy=1,ny)
+    !density
+    write(33) ((sngl(dens_x(jy,kz)), jy=1,ny), kz=1,nz)
+    write(33) ((sngl(dens_y(ix,kz)), ix=1,nx), kz=1,nz)
+    write(33) ((sngl(dens_z(ix,jy)), ix=1,nx), jy=1,ny)
+    !velocity
+    write(33) ((sngl(los_vx(jy,kz)), jy=1,ny), kz=1,nz)
+    write(33) ((sngl(los_vy(ix,kz)), ix=1,nx), kz=1,nz)
+    write(33) ((sngl(los_vz(ix,jy)), ix=1,nx), jy=1,ny)
     close(33)
+
+    !PHASE DIAGRAM
+    open(unit=32, file='output_files/phase_diagram'//'_it_'//iter_string//'_ih_'//ih_string, form='unformatted')
+    !header
+    write(32) nx, ny, nz 
+    !phase diagram
+    write(32) (sngl(T_SZ_cells))
+    write(32) (sngl(dens_SZ_cells))
+    close(32)
 
     ! Deallocation
     deallocate(grid_faces_x, grid_faces_y, grid_faces_z, grid_centers_x, grid_centers_y, grid_centers_z)
     deallocate(which_patches)
     deallocate(local_kSZ_x, local_kSZ_y, local_kSZ_z, global_kSZ_x, global_kSZ_y, global_kSZ_z)
     deallocate(tSZ_x, tSZ_y, tSZ_z)
+    deallocate(dens_x, dens_y, dens_z)
+    deallocate(los_vx, los_vy, los_vz)
+    deallocate(T_SZ_cells)
+    deallocate(dens_SZ_cells)
 
 enddo !loop over clusters
+
+open(unit=31, file='output_files/thrash_mass_fraction'//'_it_'//iter_string//'.dat', form='unformatted')
+!header
+write(31) nhaloes
+write(31) (sngl(mvir_array))
+write(31) (sngl(thrash_mass_fraction))
+close(31)
+deallocate(thrash_mass_fraction)
+
+
 
 ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! 
 ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! 
