@@ -1,0 +1,17 @@
+!!!!! HYDRO COARSE GRID (LEVEL=0)  --------------------------------------
+
+integer, parameter ::  NMAX=256      
+integer, parameter ::  NMAY=256  
+integer, parameter ::  NMAZ=256                                                            
+
+!!!!! REFINEMENTS -------------------------------------------------------
+
+integer, parameter :: NPALEV=20000                                      
+integer, parameter :: NLEVELS=6                          
+integer, parameter :: NAMRX=64     
+integer, parameter :: NAMRY=64  
+integer, parameter :: NAMRZ=64  
+    
+!!!!! HALOES ------------------------------------------------------------
+
+integer, parameter :: NMAXCLUS=100000   
