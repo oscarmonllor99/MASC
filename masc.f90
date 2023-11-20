@@ -10,7 +10,7 @@
 ! c = 1
 ! G = 1/(8pi)
 ! H = 3.66e-3 h (u.t.^-1  or   u.v./u.l.)
-! 1 u.dens. = 4.72e-21 kg/m^3
+! 1 u.dens. = 4.72e-22 kg/m^3
 
 !***********************************************************************
 !*      SUBROUTINES IN EXTERNAL FILES                                  *
@@ -60,7 +60,7 @@ character(len=5) iter_string
 character(len=5) ih_string
 integer :: first, last, every, iter, is_magnetic_field, apply_filter
 real :: zeta
-real(8) :: ache, omega0, fdm, zeta8, rho_background
+real(8) :: ache, omega0, fdm, zeta8, rho_background, re0 = 1.0/10.98 !Scale factor at z=0 in MASCLET units
 real :: lado0
 real :: cio_mass, cio_lenght, cio_speed
 real :: thres_mass, factor_Rvir, temp_cutoff, dens_cutoff
@@ -111,8 +111,6 @@ READ(1,*) !Cluster mass threshold (Msun) ---------------------------------------
 READ(1,*) thres_mass
 READ(1,*) !Cluster box half sidelength factor (cMpc) (to multiply Rvir) --------->
 READ(1,*) factor_Rvir
-READ(1,*) !Cluster radius of core region to calculate bulk velocity (cMpc) ------>
-READ(1,*) R_core
 READ(1,*) !T_cutoff (K), dens_cutoff (1/m^3) ------------------------------------>
 READ(1,*) temp_cutoff, dens_cutoff
 dens_cutoff = dens_cutoff * cgs_to_density !internal units
@@ -204,16 +202,15 @@ call read_clus(iter, is_magnetic_field, U1, U2, U3, U4, temp, cr0amr, &
 ! CREATE patch_level ARRAY
 call create_patch_levels(npalev, nlevels, npatch, patch_level)
 
-
-
-! BACKGROUND DENSITY of the UNIVERSE at this redshift
+! BACKGROUND DENSITY of the UNIVERSE at this redshift ! note 1/(8piG) = 1 in internal units
 zeta8 = dble(zeta)
-rho_background = omega0 * 1.879e-29 * ache**2 * (1.0 + zeta8)**3.0 !cgs
-write(*,*) 'rho_background (g/cm^3)', rho_background
-rho_background = rho_background * cgs_to_density !internal units
+rho_background =  3.d0 * omega0 * (3.66D-3*ache)**2 * (1.0 + zeta8)**3 !internal units
+write(*,*) 'rho_background (g/cm^3)', rho_background*density_to_cgs
+write(*,*) 'zeta8', zeta8
 ! U1 and U11 (density_contrast) to density
 U1 = (1. + U1) * rho_background
 U11 = (1. + U11) * rho_background
+
 
 ! write(*,*) 'max density', maxval(abs(U11))
 ! write(*,*) 'max vx', maxval(abs(U21))
@@ -252,16 +249,22 @@ do ih=1,nhaloes
     !Define the uniform grid
     res = (lado0/nmax)/2**nlevels
     xlims(1) = box(1)
-    xlims(2) = box(2) + (res - mod(box(2) - box(1), res) ) !Number of cells between the box boundaries must be an integer, thus we modify the right boundary
+    xlims(2) = box(2) + (res - mod(factor_Rvir*halVirRad(ih), res) ) !Number of cells between the box boundaries must be an integer, thus we modify the right boundary
     ylims(1) = box(3)
-    ylims(2) = box(4) + (res - mod(box(4) - box(3), res) )
+    ylims(2) = box(4) + (res - mod(factor_Rvir*halVirRad(ih), res) )
     zlims(1) = box(5)
-    zlims(2) = box(6) + (res - mod(box(6) - box(5), res) )
+    zlims(2) = box(6) + (res - mod(factor_Rvir*halVirRad(ih), res) )
 
-    nx = int((xlims(2) - xlims(1))/res)
-    ny = int((ylims(2) - ylims(1))/res)
-    nz = int((zlims(2) - zlims(1))/res)
+    nx = int((xlims(2) - xlims(1))/res) !use the same resolution in the 3 directions
+    ny = int((xlims(2) - xlims(1))/res)
+    nz = int((xlims(2) - xlims(1))/res)
     
+    !they must be equal 
+    if (nx /= ny .or. nx /= nz) then
+        write(*,*) 'ERROR: nx, ny, nz must be equal',(xlims(2) - xlims(1))/res,(ylims(2) - ylims(1))/res,(zlims(2) - zlims(1))/res
+        stop
+    endif
+
     ! Allocate and initialize the uniform grid
     allocate(grid_faces_x(nx+1), grid_faces_y(ny+1), grid_faces_z(nz+1), grid_centers_x(nx), grid_centers_y(ny), grid_centers_z(nz))
 
@@ -294,22 +297,23 @@ do ih=1,nhaloes
     ! furthermore, the bulk velocity must be calculated inside some R_core (e.g 300 kpc) from the density peak
     ! this is in order to avoid the bulk velocity of the cluster to be contaminated by the infalling substructures
     ! Recalculate the bulk velocity of the cluster
-    bulkVx = 0.0
-    bulkVy = 0.0
-    bulkVz = 0.0
-    gas_mass = 0.0
-    call gas_core_bulk_velocity(npalev, namrx, namry, namrz, &
-                                  patch_level, patchrx, patchry, patchrz, &
-                                  patchnx, patchny, patchnz, npatches_inside, &
-                                  which_patches, lado0, nx, solap, cr0amr1, &
-                                  U11, U21, U31, U41, &
-                                  halRx(ih), halRy(ih), halRz(ih), R_core, bulkVx, bulkVy, bulkVz, gas_mass)
-    bulkVx = bulkVx * cio_speed
-    bulkVy = bulkVy * cio_speed
-    bulkVz = bulkVz * cio_speed
-    ! bulkVx = halVx(ih)
-    ! bulkVy = halVy(ih)
-    ! bulkVz = halVz(ih)
+    ! bulkVx = 0.0
+    ! bulkVy = 0.0
+    ! bulkVz = 0.0
+    ! gas_mass = 0.0
+    ! call gas_core_bulk_velocity(npalev, namrx, namry, namrz, &
+    !                               patch_level, patchrx, patchry, patchrz, &
+    !                               patchnx, patchny, patchnz, npatches_inside, &
+    !                               which_patches, lado0, nx, solap, cr0amr1, &
+    !                               U11, U21, U31, U41, &
+    !                               halRx(ih), halRy(ih), halRz(ih), R_core, bulkVx, bulkVy, bulkVz, gas_mass)
+    ! bulkVx = bulkVx * cio_speed
+    ! bulkVy = bulkVy * cio_speed
+    ! bulkVz = bulkVz * cio_speed
+    
+    bulkVx = halVx(ih)
+    bulkVy = halVy(ih)
+    bulkVz = halVz(ih)
 
     write(*,*) '    Now, calculating the SZ effect...'
 
@@ -349,10 +353,10 @@ do ih=1,nhaloes
     call SZ_effect(nx, ny, nz, res, grid_centers_x, grid_centers_y, grid_centers_z, &
                     npalev, namrx, namry, namrz, patch_level, patchrx, patchry, patchrz, &
                     patchnx, patchny, patchnz, npatches_inside, which_patches, &
-                    lado0, nmax, solap, U1, U11, U2, U21, U3, U31, U4, U41, temp, temp1, &
+                    lado0, nmax, solap, cr0amr1, U1, U11, U2, U21, U3, U31, U4, U41, temp, temp1, &
                     halRx(ih), halRy(ih), halRz(ih), halVirRad(ih), &
                     bulkVx, bulkVy, bulkVz, &
-                    zeta8, &
+                    zeta8, re0, &
                     local_kSZ_x, local_kSZ_y, local_kSZ_z, tSZ_x, tSZ_y, tSZ_z, &
                     global_kSZ_x, global_kSZ_y, global_kSZ_z, &
                     dens_x, dens_y, dens_z, los_vx, los_vy, los_vz, &
@@ -379,7 +383,7 @@ do ih=1,nhaloes
     write(33) ((sngl(global_kSZ_z(ix,jy)), ix=1,nx), jy=1,ny)
     write(33) ((sngl(tSZ_x(jy,kz)), jy=1,ny), kz=1,nz)
     write(33) ((sngl(tSZ_y(ix,kz)), ix=1,nx), kz=1,nz)
-    write(33) ((sngl(tSZ_z(ix,jy)), ix=1,nx), jy=1,ny)
+    write(33) ((sngl(tSZ_z(ix,jy)), ix=1,nx), jy=1,ny)  
     !density
     write(33) ((sngl(dens_x(jy,kz)), jy=1,ny), kz=1,nz)
     write(33) ((sngl(dens_y(ix,kz)), ix=1,nx), kz=1,nz)
@@ -390,14 +394,14 @@ do ih=1,nhaloes
     write(33) ((sngl(los_vz(ix,jy)), ix=1,nx), jy=1,ny)
     close(33)
 
-    !PHASE DIAGRAM
-    open(unit=32, file='output_files/phase_diagram'//'_it_'//iter_string//'_ih_'//ih_string, form='unformatted')
-    !header
-    write(32) nx, ny, nz 
-    !phase diagram
-    write(32) (sngl(T_SZ_cells))
-    write(32) (sngl(dens_SZ_cells))
-    close(32)
+    ! !PHASE DIAGRAM
+    ! open(unit=32, file='output_files/phase_diagram'//'_it_'//iter_string//'_ih_'//ih_string, form='unformatted')
+    ! !header
+    ! write(32) nx, ny, nz 
+    ! !phase diagram
+    ! write(32) (sngl(T_SZ_cells))
+    ! write(32) (sngl(dens_SZ_cells))
+    ! close(32)
 
     ! Deallocation
     deallocate(grid_faces_x, grid_faces_y, grid_faces_z, grid_centers_x, grid_centers_y, grid_centers_z)
@@ -418,6 +422,7 @@ write(31) (sngl(mvir_array))
 write(31) (sngl(thrash_mass_fraction))
 close(31)
 deallocate(thrash_mass_fraction)
+deallocate(mvir_array)
 
 
 

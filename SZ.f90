@@ -2,7 +2,7 @@
 subroutine find_corresponding_AMR_cell(xpoint, ypoint, zpoint, npalev, namrx, namry, namrz, &
                                         patch_level, patchrx, patchry, patchrz, &
                                         patchnx, patchny, patchnz, npatches_inside, &
-                                        which_patches, L, ncoarse, solap, &
+                                        which_patches, L, ncoarse, solap, cr0amr1, &
                                         patch_id, amr_ix, amr_iy, amr_iz)
 implicit none
 
@@ -12,7 +12,7 @@ real :: L
 integer, dimension(npalev) :: patchnx, patchny, patchnz, patch_level
 real, dimension(npalev) :: patchrx, patchry, patchrz
 integer, dimension(npatches_inside) :: which_patches
-integer, dimension(namrx, namry, namrz, npalev) :: solap
+integer, dimension(namrx, namry, namrz, npalev) :: solap, cr0amr1
 real(8) :: xpoint, ypoint, zpoint
 !output
 integer :: patch_id, amr_ix, amr_iy, amr_iz
@@ -42,12 +42,12 @@ do ipatch=npatches_inside,1,-1 !start by the finest patch
          (zpoint > patch_rz - patch_res) .and. (zpoint < patch_rz + patch_res*(patch_nz-1))   ) then
 
         !Find the AMR cell of the patch that contains the point
-        amr_ix = int((xpoint - patch_rx) / patch_res + 0.5) + 1
-        amr_iy = int((ypoint - patch_ry) / patch_res + 0.5) + 1
-        amr_iz = int((zpoint - patch_rz) / patch_res + 0.5) + 1
+        amr_ix = int((xpoint - patch_rx) / patch_res + 1) + 1
+        amr_iy = int((ypoint - patch_ry) / patch_res + 1) + 1
+        amr_iz = int((zpoint - patch_rz) / patch_res + 1) + 1
 
         !Check if it is the master cell
-        if (solap(amr_ix, amr_iy, amr_iz, iipatch) == 1) then
+        if (solap(amr_ix, amr_iy, amr_iz, iipatch) == 1  .and. cr0amr1(amr_ix, amr_iy, amr_iz, iipatch) == 1) then
             patch_id = iipatch
             exit
         endif
@@ -57,12 +57,12 @@ end do
 !Calculate amr_ix, amr_iy, amr_iz if the point is in the coarse grid
 if (patch_id == 0) then
     patch_res = L / ncoarse
-    patch_rx = -L/2 + patch_res
-    patch_ry = -L/2 + patch_res
-    patch_rz = -L/2 + patch_res
-    amr_ix = int((xpoint - patch_rx) / patch_res + 0.5) + 1
-    amr_iy = int((ypoint - patch_ry) / patch_res + 0.5) + 1
-    amr_iz = int((zpoint - patch_rz) / patch_res + 0.5) + 1
+    patch_rx = - L/2 
+    patch_ry = - L/2 
+    patch_rz = - L/2 
+    amr_ix = int((xpoint - patch_rx) / patch_res) + 1
+    amr_iy = int((ypoint - patch_ry) / patch_res) + 1
+    amr_iz = int((zpoint - patch_rz) / patch_res) + 1
 end if
 end subroutine
 
@@ -72,10 +72,10 @@ end subroutine
 subroutine SZ_effect(nx, ny, nz, res, grid_centers_x, grid_centers_y, grid_centers_z, &
                     npalev, namrx, namry, namrz, patch_level, patchrx, patchry, patchrz, &
                     patchnx, patchny, patchnz, npatches_inside, which_patches, &
-                    L, ncoarse, solap, U1, U11, U2, U21, U3, U31, U4, U41, temp, temp1, &
+                    L, ncoarse, solap, cr0amr1, U1, U11, U2, U21, U3, U31, U4, U41, temp, temp1, &
                     cx, cy, cz, radius, &
                     bulkVx, bulkVy, bulkVz, &
-                    zeta8, &
+                    zeta8, re0, &
                     local_kSZ_x, local_kSZ_y, local_kSZ_z, tSZ_x, tSZ_y, tSZ_z, &
                     global_kSZ_x, global_kSZ_y, global_kSZ_z, &
                     dens_x, dens_y, dens_z, los_vx, los_vy, los_vz, &
@@ -92,7 +92,7 @@ real :: L, temp_cutoff, dens_cutoff
 integer, dimension(npalev) :: patchnx, patchny, patchnz, patch_level
 real, dimension(npalev) :: patchrx, patchry, patchrz
 integer, dimension(npatches_inside) :: which_patches
-integer, dimension(namrx, namry, namrz, npalev) :: solap
+integer, dimension(namrx, namry, namrz, npalev) :: solap, cr0amr1
 real, dimension(ncoarse, ncoarse, ncoarse) :: U1, U2, U3, U4, temp
 real, dimension(namrx, namry, namrz, npalev) :: U11, U21, U31, U41, temp1
 real :: cx, cy, cz, radius
@@ -102,6 +102,7 @@ real(8), dimension(ny) :: grid_centers_y
 real(8), dimension(nz) :: grid_centers_z
 real(8) :: res
 real(8) :: zeta8
+real(8) :: re0
 real(8), dimension(ny, nz) :: local_kSZ_x, global_kSZ_x, tSZ_x, dens_x, los_vx
 real(8), dimension(nx, nz) :: local_kSZ_y, global_kSZ_y, tSZ_y, dens_y, los_vy
 real(8), dimension(nx, ny) :: local_kSZ_z, global_kSZ_z, tSZ_z, dens_z, los_vz
@@ -154,7 +155,7 @@ do kz=1,nz
             call find_corresponding_AMR_cell(xpoint, ypoint, zpoint, npalev, namrx, namry, namrz, &
                                             patch_level, patchrx, patchry, patchrz, &
                                             patchnx, patchny, patchnz, npatches_inside, &
-                                            which_patches, L, ncoarse, solap, &
+                                            which_patches, L, ncoarse, solap, cr0amr1, &
                                             patch_id, amr_ix, amr_iy, amr_iz)
             
             if (patch_id == 0) then !coarse grid
@@ -173,21 +174,21 @@ do kz=1,nz
 
             !check density and temperature (to prove that it is indeed ICM)
             !control for avoided cells
-            if (dens > dens_cutoff .or. T < temp_cutoff) then
+            if (dens > dens_cutoff*(1+zeta8)**3 .or. T < temp_cutoff) then
                 thrashVol_x = thrashVol_x + res**3
                 thrashMass_x = thrashMass_x + dens * res**3
             endif
             volTot_x = volTot_x + res**3
             massTot_x = massTot_x + dens * res**3
 
-            !avoid cluster center for unusually high values 
-            if ((xpoint-cx)**2 + (ypoint-cy)**2 + (zpoint-cz)**2 < (0.1*radius)**2) then
-                cycle
-            endif
+            ! !avoid cluster center for unusually high values 
+            ! if ((xpoint-cx)**2 + (ypoint-cy)**2 + (zpoint-cz)**2 < (0.1*radius)**2) then
+            !     cycle
+            ! endif
 
             !density threshold for avoiding unphyisical clumps
-            if (dens > dens_cutoff) then
-                dens = dens_cutoff
+            if (dens > dens_cutoff*(1+zeta8)**3) then
+                dens = dens_cutoff*(1+zeta8)**3
             endif
             
             !tempreature threshold for selecting just ICM (ionized)
@@ -223,7 +224,7 @@ do kz=1,nz
             call find_corresponding_AMR_cell(xpoint, ypoint, zpoint, npalev, namrx, namry, namrz, &
                                             patch_level, patchrx, patchry, patchrz, &
                                             patchnx, patchny, patchnz, npatches_inside, &
-                                            which_patches, L, ncoarse, solap, &
+                                            which_patches, L, ncoarse, solap, cr0amr1, &
                                             patch_id, amr_ix, amr_iy, amr_iz)
 
             if (patch_id == 0) then !coarse grid
@@ -236,14 +237,14 @@ do kz=1,nz
                 LOSvel = U31(amr_ix, amr_iy, amr_iz, patch_id)
             endif
 
-            !avoid cluster center for unusually high values 
-            if ((xpoint-cx)**2 + (ypoint-cy)**2 + (zpoint-cz)**2 < (0.1*radius)**2) then
-                cycle
-            endif
+            ! !avoid cluster center for unusually high values 
+            ! if ((xpoint-cx)**2 + (ypoint-cy)**2 + (zpoint-cz)**2 < (0.1*radius)**2) then
+            !     cycle
+            ! endif
 
             !check density and temperature (to prove that it is indeed ICM)
-            if (dens > dens_cutoff) then
-                dens = dens_cutoff
+            if (dens > dens_cutoff*(1+zeta8)**3) then
+                dens = dens_cutoff*(1+zeta8)**3
             endif
 
             if (T < temp_cutoff) then
@@ -278,7 +279,7 @@ do jy=1,ny
             call find_corresponding_AMR_cell(xpoint, ypoint, zpoint, npalev, namrx, namry, namrz, &
                                             patch_level, patchrx, patchry, patchrz, &
                                             patchnx, patchny, patchnz, npatches_inside, &
-                                            which_patches, L, ncoarse, solap, &
+                                            which_patches, L, ncoarse, solap, cr0amr1, &
                                             patch_id, amr_ix, amr_iy, amr_iz)
                                             
             if (patch_id == 0) then !coarse grid
@@ -291,14 +292,14 @@ do jy=1,ny
                 LOSvel = U41(amr_ix, amr_iy, amr_iz, patch_id)
             endif
 
-            !avoid cluster center for unusually high values 
-            if ((xpoint-cx)**2 + (ypoint-cy)**2 + (zpoint-cz)**2 < (0.1*radius)**2) then
-                cycle
-            endif
+            ! !avoid cluster center for unusually high values 
+            ! if ((xpoint-cx)**2 + (ypoint-cy)**2 + (zpoint-cz)**2 < (0.1*radius)**2) then
+            !     cycle
+            ! endif
 
             !check density and temperature (to prove that it is indeed ICM)
-            if (dens > dens_cutoff) then
-                dens = dens_cutoff
+            if (dens > dens_cutoff*(1+zeta8)**3) then
+                dens = dens_cutoff*(1+zeta8)**3
             endif
 
             if (T < temp_cutoff) then
@@ -348,31 +349,31 @@ dens_z = dens_z / (mu*mp)
 
 !Third, multiply by the factors outside the integral
 global_kSZ_x = global_kSZ_x * factor_kSZ
-global_kSZ_y = global_kSZ_y * factor_kSZ
-global_kSZ_z = global_kSZ_z * factor_kSZ
-local_kSZ_x = local_kSZ_x * factor_kSZ
-local_kSZ_y = local_kSZ_y * factor_kSZ
-local_kSZ_z = local_kSZ_z * factor_kSZ
+global_kSZ_y = global_kSZ_y * factor_kSZ 
+global_kSZ_z = global_kSZ_z * factor_kSZ 
+local_kSZ_x = local_kSZ_x * factor_kSZ 
+local_kSZ_y = local_kSZ_y * factor_kSZ 
+local_kSZ_z = local_kSZ_z * factor_kSZ 
 tSZ_x = tSZ_x * factor_tSZ
 tSZ_y = tSZ_y * factor_tSZ
 tSZ_z = tSZ_z * factor_tSZ
 
-!Last, redshift dependence of the cell size
-global_kSZ_x = global_kSZ_x * (1.0+zeta8)
-global_kSZ_y = global_kSZ_y * (1.0+zeta8)
-global_kSZ_z = global_kSZ_z * (1.0+zeta8)
-local_kSZ_x = local_kSZ_x * (1.0+zeta8)
-local_kSZ_y = local_kSZ_y * (1.0+zeta8)
-local_kSZ_z = local_kSZ_z * (1.0+zeta8)
-tSZ_x = tSZ_x * (1.0+zeta8)
-tSZ_y = tSZ_y * (1.0+zeta8)
-tSZ_z = tSZ_z * (1.0+zeta8)
+!Last, from internal units to Mpc
+global_kSZ_x = global_kSZ_x / (1.0+zeta8)
+global_kSZ_y = global_kSZ_y / (1.0+zeta8)
+global_kSZ_z = global_kSZ_z / (1.0+zeta8)
+local_kSZ_x = local_kSZ_x / (1.0+zeta8)
+local_kSZ_y = local_kSZ_y / (1.0+zeta8)
+local_kSZ_z = local_kSZ_z / (1.0+zeta8)
+tSZ_x = tSZ_x / (1.0+zeta8)
+tSZ_y = tSZ_y / (1.0+zeta8)
+tSZ_z = tSZ_z / (1.0+zeta8)
 
-!
+!Thrash mass fraction to analyze the effect of the density and temperature thresholds
 thrash_mass_fraction = thrashMass_x/massTot_x
 
 
-write(*,*) 'Thrash mass fraction', thrashMass_x/massTot_x, thrashMass_x, massTot_x
-write(*,*) 'Thrash volume fraction', thrashVol_x/volTot_x, thrashVol_x, volTot_x
+! write(*,*) 'Thrash mass fraction', thrashMass_x/massTot_x, thrashMass_x, massTot_x
+! write(*,*) 'Thrash volume fraction', thrashVol_x/volTot_x, thrashVol_x, volTot_x
 
 end subroutine
